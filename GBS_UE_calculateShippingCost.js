@@ -3,37 +3,127 @@
  * @NScriptType UserEventScript
  */
 
-define(["N/search"], function (search) {
+/***********************************************************************
+ * Description:  This Script will work for Calculating Shipping Cost on Sales Order, Invoice
+ * and Item Fulfillment Record based on Conditions like Mattress Landed is Checked or Not on 
+ * Customer and Item Record,Item Types included are Inventory Items or Assembly/bill Items or 
+ * Kit Items and other Items are Excluded from the Calculation, "EXCLUDED FROM NEW FREIGHT MODEL" 
+ * checkbox is Checked or Not and based on this Conditions it will Calculate Shipping Subtotal 
+ * from the Total Item Amount and based on Shipping Subtotal and State it will map Search 
+ * Percentage from "New Freight Model_1" Custom Record and then Calculating Shipping Cost and 
+ * Set on Shipping Cost Field.      
+ 
+ * Version: 1.0.0 - Initial version
+ * Author:  Green Business/Palavi Rajgude
+ * Date:    08-02-2022
+ 
+ ***********************************************************************/
 
-  //function for calculating shipping cost on sales order by checking mattress landed and item type
+ define([
+  "N/search",
+  "N/runtime",
+  "N/record",
+  "SuiteScripts/Green Business Systems/SuiteScripts/GBS_LIB_UE_calculateShippingCost.js"
+], function (search, runtime, record, lib) {
+  //function for calculating shipping cost on sales order, invoice and item fulfillment
   function shippingCostFreightCalculation(context) {
     try {
-      var loadSalesOrder = context.newRecord;
-      var shippingCostSubtotal = 0;
+      var calculateShippingCostScript = runtime.getCurrentScript();
 
-      var checkPopForm = loadSalesOrder.getValue({
-        fieldId: "customform",
+      var loadTransactionRecord = context.newRecord;
+
+      var recordType = loadTransactionRecord.type;
+
+      //check pop sales order form id
+      var checkPopFormId = calculateShippingCostScript.getParameter({
+        name: "custscript_gbs_form_id"
       });
 
-      if (checkPopForm != 176) {
-        var checkExcludeFreightModel = loadSalesOrder.getValue({
-          fieldId: "custbody_gbs_excluded_sale_freight_mod",
-        });
+      var getCustomerId = loadTransactionRecord.getValue({
+        fieldId: "entity"
+      });
 
-        if (checkExcludeFreightModel != true) {
-          var checkShippingMethod = loadSalesOrder.getValue({
-            fieldId: "shipmethod",
-          });
+      var getPercentFromCustomer = search.lookupFields({
+        type: "customer",
+        id: getCustomerId,
+        columns: ["custentity_percent_nfm_customer"]
+      });
 
-          if (checkShippingMethod == 110157) {
+      //check pop invoice form id
+      var checkInvoiceFormId = calculateShippingCostScript.getParameter({
+        name: "custscript_gbs_invoice_form_id"
+      });
 
+      //get pop sales order form
+      var checkPopForm = loadTransactionRecord.getValue({
+        fieldId: "customform"
+      });
 
-            shippingCostSubtotal = subtotalForMattressLanded(loadSalesOrder);
+      //get "MANUAL FREIGHT COST" checkbox value
+      var checkManualFreightCost = loadTransactionRecord.getValue({
+        fieldId: "custbody_gbs_invoice_manual_freight_co"
+      });
 
-            getPercentFromState(shippingCostSubtotal, loadSalesOrder);
+      var getChargedFlatShippingCost = loadTransactionRecord.getValue({
+        fieldId: "custbody_charged_flat_shipping_sales"
+      });
 
-            shippingCost(shippingCostSubtotal, loadSalesOrder);
-          }
+      var runShippingCostObject = {
+        loadTransactionRecord: loadTransactionRecord,
+        calculateShippingCostScript: calculateShippingCostScript,
+        recordType: recordType,
+        getChargedFlatShippingCost: getChargedFlatShippingCost,
+        getPercentFromCustomer: getPercentFromCustomer
+      };
+
+      var getChargeActualShipping = loadTransactionRecord.getValue({
+        fieldId: "custbody_gbs_charge_actual_shipping_so"
+      });
+      
+      //Added by Chris Smith 03/23/2022
+      // Start Chris Smith Edit
+      if (recordType == "invoice" ) {
+        var exclude = loadTransactionRecord.getValue({fieldId: 'custbody_gbs_excluded_sale_freight_mod'});
+        if (exclude == true) {
+          loadTransactionRecord.setValue({fieldId: 'shippingcost', value: 0});
+          return;
+        }
+      }
+      // End Chris Smith Edit
+
+      //if form type is not pop form and record type is sales order then calculate shipping cost on sales order
+      if (checkPopForm != checkPopFormId && recordType == "salesorder") {
+        runShippingCostCalculation(runShippingCostObject);
+      }
+      //else if form type is not pop form and record type is invoice then calculate shipping cost on invoice
+      else if (
+        checkPopForm != checkInvoiceFormId &&
+        recordType == "invoice" &&
+        checkManualFreightCost != true
+      ) {
+        if (getChargeActualShipping == true) {
+          return;
+        } else {
+          runShippingCostCalculation(runShippingCostObject);
+        }
+      }
+
+      //else if record type is itemfulfillment then calculate shipping cost on item fulfillment record
+      else if (recordType == "itemfulfillment") {
+        log.debug({
+          title: '114'
+        })
+        if (getChargeActualShipping == true) {
+          log.debug({
+            title: '115'
+          })
+          lib.chargeActualShippingIF(loadTransactionRecord);
+        } 
+        else {
+          log.debug({
+            title: '124'
+          })
+          getAmountItemFulfillment(runShippingCostObject);
         }
       }
     } catch (error) {
@@ -44,182 +134,253 @@ define(["N/search"], function (search) {
     }
   }
 
-  //function for calculating subtotal for mattress landed on customer and line item type and line item mattress landed
-  function subtotalForMattressLanded(loadSalesOrder) {
-
+  //calculate shipping cost on sales order and invoice record
+  function runShippingCostCalculation(runShippingCostObject) {
     try {
+      var {
+        loadTransactionRecord,
+        calculateShippingCostScript,
+        recordType,
+        getChargedFlatShippingCost,
+        getPercentFromCustomer
+      } = runShippingCostObject;
+
       var shippingCostSubtotal = 0;
-      var mattressSalesOrder = loadSalesOrder.getValue({
-        fieldId: "custbody_gbs_sale_mattress_land",
+
+      //get shipping address from sales order
+      var shipaddrSubRecord = loadTransactionRecord.getSubrecord({
+        fieldId: "shippingaddress"
       });
 
-      var lineCountItem = loadSalesOrder.getLineCount({
-        sublistId: "item",
+      //get "state" from shipping address subrecord
+      var stateOnSubRecord = shipaddrSubRecord.getValue({ fieldId: "state" });
+
+      //get "EXCLUDED FROM NEW FREIGHT MODEL" checkbox value
+      var checkExcludeFreightModel = loadTransactionRecord.getValue({
+        fieldId: "custbody_gbs_excluded_sale_freight_mod"
       });
 
-      for (var i = 0; i < lineCountItem; i++) {
-        var itemId = loadSalesOrder.getSublistValue({
-          sublistId: "item",
-          fieldId: "item",
-          line: i,
-        });
+      log.debug({
+        title: 'checkExcludeFreightModel',
+        details: checkExcludeFreightModel
+      })
 
-        var itemType = search.lookupFields({
-          type: search.Type.ITEM,
-          id: itemId,
-          columns: ["type"],
-        });
-
-        if (mattressSalesOrder == true) {
-          var lineItemMattress = loadSalesOrder.getSublistValue({
-            sublistId: "item",
-            fieldId: "custcol_gbs_sale_line_mattress_land",
-            line: i,
+      //if "EXCLUDED FROM NEW FREIGHT MODEL" checkbox value is not equal to true then check "Shipping Method" otherwise script will not calculate shipping cost
+      if (checkExcludeFreightModel != true) {
+        //sales order record data pass to "subtotalForMattressLanded" function
+        shippingCostSubtotal = lib.subtotalForMattressLanded(
+          loadTransactionRecord
+        );
+       
+          //set shipping cost subtotal value on "SUBTOTAL FOR NEW FREIGHT CALCULATION" field
+          loadTransactionRecord.setValue({
+            fieldId: "custbody_gbs_sale_subtotal_freight_cal",
+            value: parseFloat(nullValidation(shippingCostSubtotal))
           });
+        
 
-          if (lineItemMattress == false) {
-            if (
-              itemType.type[0].value == "Assembly" ||
-              itemType.type[0].value == "InvtPart" ||
-              itemType.type[0].value == "Kit"
-            ) {
-              shippingCostSubtotal =
-                shippingCostSubtotal +
-                loadSalesOrder.getSublistValue({
-                  sublistId: "item",
-                  fieldId: "amount",
-                  line: i,
-                });
-            }
-          }
-        } else if (mattressSalesOrder == false) {
-          if (
-            itemType.type[0].value == "Assembly" ||
-            itemType.type[0].value == "InvtPart" ||
-            itemType.type[0].value == "Kit"
-          ) {
-            shippingCostSubtotal =
-              shippingCostSubtotal +
-              loadSalesOrder.getSublistValue({
-                sublistId: "item",
-                fieldId: "amount",
-                line: i,
+        //if record type is sales order then shipping cost subtotal and sales order record data pass to "getPercentFromState" function
+        if (recordType == "salesorder") {
+          if (getChargedFlatShippingCost == true) {
+
+              loadTransactionRecord.setValue({
+                fieldId: "custbody_gbs_sale_percent_freight_calc",
+                value: parseInt(nullValidation(getPercentFromCustomer.custentity_percent_nfm_customer))
               });
+             
+            
+          } else {
+            lib.getPercentFromState(
+              shippingCostSubtotal,
+              loadTransactionRecord,
+              stateOnSubRecord
+            );
           }
         }
-      }
 
-      return shippingCostSubtotal;
-    }
-    catch (error) {
+        //shipping cost subtotal and sales order record data pass to "shippingCost" function
+        lib.shippingCost(shippingCostSubtotal, loadTransactionRecord);
+      }
+    } catch (error) {
       log.debug(
-        'error in subtotalForMattressLanded() function',
+        "error in runShippingCostCalculation() function",
         error.toString()
       );
     }
   }
 
-
-  //function for getting percent from saved search by subtotal and state
-  function getPercentFromState(shippingCostSubtotal, loadSalesOrder) {
-
+  //calculate shipping cost subtotal from item fulfillment record
+  function getAmountItemFulfillment(runShippingCostObject) {
     try {
-
-      var shipaddrSubRecord = loadSalesOrder.getSubrecord({
-        fieldId: "shippingaddress",
+      var {
+        loadTransactionRecord,
+        calculateShippingCostScript,
+        recordType,
+        getChargedFlatShippingCost
+      } = runShippingCostObject;
+      log.debug({
+        title: '222'
+      })
+      //get shipping address from sales order
+      var shipaddrSubRecord = loadTransactionRecord.getSubrecord({
+        fieldId: "shippingaddress"
       });
 
-
+      //get "state" from shipping address subrecord
       var stateOnSubRecord = shipaddrSubRecord.getValue({ fieldId: "state" });
 
-
-      shippingCostSubtotal = parseInt(shippingCostSubtotal);
-
+      //if state is not present on shipping address then script will not calculate shipping cost
       if (stateOnSubRecord == "") {
-
         return false;
       }
 
-      var percentResultSavedSearch = search.create({
-        type: "customrecord_gbs_nfm",
-        filters: [
-          ["custrecord_gbs_nfm1_state", "startswith", stateOnSubRecord],
-          "AND",
-          ["custrecord_gbs_nfm1_lor", "lessthan", shippingCostSubtotal],
-          "AND",
-          ["custrecord_gbs_nfm1_upr", "greaterthan", shippingCostSubtotal],
-        ],
-        columns: [
-          search.createColumn({
-            name: "custrecord_gbs_nfm1_percen",
-            label: "Percentage",
-          }),
-          search.createColumn({
-            name: "scriptid",
-            sort: search.Sort.ASC,
-            label: "Script ID",
-          }),
-          search.createColumn({
-            name: "custrecord_gbs_nfm1_state",
-            label: "State",
-          }),
-          search.createColumn({
-            name: "custrecord_gbs_nfm1_country",
-            label: "Country",
-          }),
-          search.createColumn({
-            name: "custrecord_gbs_nfm1_upr",
-            label: "Upper Range",
-          }),
-          search.createColumn({
-            name: "custrecord_gbs_nfm1_lor",
-            label: "Lower Range",
-          }),
-        ],
+      //get "EXCLUDED FROM NEW FREIGHT MODEL" checkbox value
+      var checkExcludeFreightModel = loadTransactionRecord.getValue({
+        fieldId: "custbody_gbs_excluded_sale_freight_mod"
       });
 
-      percentResultSavedSearch.run().each(function (result) {
-        var percentFromSavedSearch = result.getValue(
-          "custrecord_gbs_nfm1_percen"
-        );
+      var shippingCostSubtotal = 0;
+      //if "EXCLUDED FROM NEW FREIGHT MODEL" checkbox value is not equal to true then check "Shipping Method" otherwise script will not calculate shipping cost
+      if (checkExcludeFreightModel != true) {
+        //get shipping method from sales order record
+        
 
-        loadSalesOrder.setValue({
-          fieldId: "custbody_gbs_sale_percent_freight_calc",
-          value: parseInt(percentFromSavedSearch),
+        //check "Custom" shipping method id
+        // var checkShippingMethodId = calculateShippingCostScript.getParameter({
+        //   name: "custscript_gbs_shipping_method_id",
+        // });
+
+        //if "Shipping Method" is custom then calculate shipping cost
+        
+    
+
+          //get value from "Mattress Landed" checkbox
+          var mattressSalesOrder = loadTransactionRecord.getValue({
+            fieldId: "custbody_gbs_sale_mattress_land"
+          });
+
+          //get sales order record from "CREATED FROM" field
+          var createFromItemFul = loadTransactionRecord.getValue({
+            fieldId: "createdfrom"
+          });
+
+          var lineCountItem = loadTransactionRecord.getLineCount({
+            sublistId: "item"
+          });
+
+          var loadSo = record.load({
+            type: record.Type.SALES_ORDER,
+            id: createFromItemFul
+          });
+
+          for (var i = 0; i < lineCountItem; i++) {
+
+               //get item id from line items
+               var itemRecieveIF = loadTransactionRecord.getSublistValue({
+                sublistId: "item",
+                fieldId: "itemreceive",
+                line: i
+              });
+
+              if(itemRecieveIF == true){
+
+            //get item id from line items
+            var itemIdOnItemFulfill = loadTransactionRecord.getSublistValue({
+              sublistId: "item",
+              fieldId: "item",
+              line: i
+            });
+
+            //get value from items on sales order
+            var itemFulfillLine = loadSo.findSublistLineWithValue({
+              sublistId: "item",
+              fieldId: "item",
+              value: itemIdOnItemFulfill
+            });
+
+            //get line item type from item fulfillment
+            var itemType = search.lookupFields({
+              type: search.Type.ITEM,
+              id: itemIdOnItemFulfill,
+              columns: ["type"]
+            });
+
+            if (mattressSalesOrder == true) {
+              //get "Mattress Landed" checkbox value from line item
+              var lineItemMattress = loadTransactionRecord.getSublistValue({
+                sublistId: "item",
+                fieldId: "custcol_gbs_sale_line_mattress_land",
+                line: i
+              });
+
+              //if "Mattress Landed" checkbox value is false on line item then check item type from item fulfillment record
+              if (lineItemMattress == false) {
+                //if line item type is assembly/bill or inventory or kit/package item then calculate subtotal from line item amount
+                if (
+                  itemType.type[0].value == "Assembly" ||
+                  itemType.type[0].value == "InvtPart" ||
+                  itemType.type[0].value == "Kit"
+                ) {
+                  shippingCostSubtotal =
+                    shippingCostSubtotal +
+                    loadSo.getSublistValue({
+                      sublistId: "item",
+                      fieldId: "amount",
+                      line: itemFulfillLine
+                    });
+                }
+              }
+            } else if (mattressSalesOrder == false) {
+              //if line item type is assembly/bill or inventory or kit/package item then calculate subtotal from line item amount
+              if (
+                itemType.type[0].value == "Assembly" ||
+                itemType.type[0].value == "InvtPart" ||
+                itemType.type[0].value == "Kit"
+              ) {
+                shippingCostSubtotal =
+                  shippingCostSubtotal +
+                  loadSo.getSublistValue({
+                    sublistId: "item",
+                    fieldId: "amount",
+                    line: itemFulfillLine
+                  });
+              }
+            }
+          }
+        }
+
+        
+
+        loadTransactionRecord.setValue({
+          fieldId: "custbody_gbs_sale_subtotal_freight_cal",
+          value: shippingCostSubtotal
         });
-      });
+        
+        lib.shippingCost(shippingCostSubtotal, loadTransactionRecord);
+      }
 
-      loadSalesOrder.setValue({
-        fieldId: "custbody_gbs_sale_subtotal_freight_cal",
-        value: shippingCostSubtotal,
-      });
-    }
-    catch (error) {
-      log.debug('error in getPercentFromState() function', error.toString());
-    }
-  }
-
-  //function for calculating shipping cost using subtotal and percent and set on shipping cost field
-  function shippingCost(shippingCostSubtotal, loadSalesOrder) {
-    try {
-      var getPercentFreight = loadSalesOrder.getValue({
-        fieldId: "custbody_gbs_sale_percent_freight_calc",
-      });
-
-      var calculateShippingCost =
-        shippingCostSubtotal * (getPercentFreight / 100);
-
-      loadSalesOrder.setValue({
-        fieldId: "shippingcost",
-        value: calculateShippingCost,
-      });
-    }
-    catch (error) {
-      log.debug('error in shippingCost() function', error.toString());
+      //set shipping cost subtotal on "SUBTOTAL FOR NEW FREIGHT CALCULATION" field
+    
+    } catch (error) {
+      log.debug(
+        "error in getAmountItemFulfillment() function",
+        error.toString()
+      );
     }
   }
 
+  function nullValidation(value){
+    if (
+      value == null &&
+      value == "" && value == undefined
+    ) {
+      value = 0;
+    }
+
+    return value;
+  }
   return {
     beforeSubmit: shippingCostFreightCalculation,
+ 
   };
 });
